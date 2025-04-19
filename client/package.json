@@ -1,21 +1,29 @@
 {
-  "name": "tunnel-client",
+  "name": "websocket-tunnel-client",
   "version": "1.0.0",
-  "description": "Client for WebSocket tunnel",
+  "description": "Client for WebSocket tunnel server, allowing local server exposure.",
   "main": "tunnel-client.js",
+  "bin": {
+    "tunnel-client": "./tunnel-client.js"
+  },
   "scripts": {
     "start": "node tunnel-client.js"
   },
   "dependencies": {
-    "ws": "^8.14.2"
-  },
-  "bin": {
-    "tunnel-client": "./tunnel-client.js"
+    "ws": "^8.14.2",
+    "yargs": "^17.7.2"
   },
   "keywords": [
     "tunnel",
     "websocket",
-    "proxy"
+    "proxy",
+    "cli",
+    "local",
+    "expose"
   ],
-  "license": "MIT"
-} 
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14"
+  }
+}

@@ -4,10 +4,40 @@ const WebSocket = require('ws');
 const http = require('http');
 const https = require('https');
 const { Buffer } = require('buffer');
+const yargs = require('yargs/yargs');
+const { hideBin } = require('yargs/helpers');
 
-// Configuration
-const SERVER_URL = 'ws://localhost:8080'; // Change this to your tunnel server URL
-const LOCAL_SERVER = 'http://localhost:3000'; // Local server to forward requests to
+// Parse command line arguments
+const argv = yargs(hideBin(process.argv))
+  .usage('Usage: $0 <local-server-url> [options]')
+  .command('$0 <localServerUrl>', 'Start the tunnel client', (yargs) => {
+    yargs.positional('localServerUrl', {
+      describe: 'The URL of the local server to forward requests to (e.g., http://localhost:3000)',
+      type: 'string'
+    })
+  })
+  .option('s', {
+    alias: 'server-url',
+    describe: 'The WebSocket URL of the tunnel server',
+    type: 'string',
+    default: 'ws://localhost:8080' // Default tunnel server URL
+  })
+  .demandCommand(1, 'You must provide the local server URL')
+  .help()
+  .alias('h', 'help')
+  .argv;
+
+// Configuration from arguments
+const LOCAL_SERVER = argv.localServerUrl;
+const SERVER_URL = argv.serverUrl;
+
+// Validate LOCAL_SERVER URL format (basic check)
+try {
+  new URL(LOCAL_SERVER);
+} catch (e) {
+  console.error(`Invalid local server URL format: ${LOCAL_SERVER}`);
+  process.exit(1);
+}
 
 // Connect to the WebSocket tunnel server
 console.log(`Connecting to tunnel server at ${SERVER_URL}...`);
@@ -25,10 +55,12 @@ ws.on('error', (error) => {
 
 // Handle connection close
 ws.on('close', (code, reason) => {
-  console.log(`Connection closed: ${code} - ${reason}`);
+  console.log(`Connection closed: ${code} - ${String(reason)}`);
   console.log('Attempting to reconnect in 5 seconds...');
   setTimeout(() => {
-    process.exit(1); // Exit so that the process can be restarted by a process manager
+    // In a real CLI, you might implement more robust reconnection
+    // For now, just exit to allow process managers to restart
+    process.exit(1); 
   }, 5000);
 });
 
@@ -39,15 +71,15 @@ ws.on('message', (data) => {
     
     if (message.type === 'connected') {
       console.log(`Tunnel established! Your tunnel ID is: ${message.tunnelId}`);
-      console.log(`Your public URL is: ${SERVER_URL.replace('ws:', 'http:').replace('wss:', 'https:')}/${message.tunnelId}`);
+      const publicUrl = SERVER_URL.replace(/^ws/, 'http') + '/' + message.tunnelId;
+      console.log(`Your public URL is: ${publicUrl}`);
     } else if (message.type === 'request') {
-      console.log(" Requested")
       handleTunnelRequest(message);
     } else {
-      console.log('Received message:', message);
+      console.log('Received unknown message type:', message.type);
     }
   } catch (error) {
-    console.error('Error processing message:', error);
+    console.error('Error processing message:', error, 'Raw data:', data.toString());
   }
 });
 
@@ -56,24 +88,28 @@ ws.on('message', (data) => {
  * @param {Object} tunnelRequest - The incoming request
  */
 function handleTunnelRequest(tunnelRequest) {
-  console.log(`Received request: ${tunnelRequest.method} ${tunnelRequest.path}`);
+  const path = tunnelRequest.path ? `/${tunnelRequest.path}` : '/';
+  console.log(`Received request: ${tunnelRequest.method} ${path}`);
+
+  // Parse local server URL
+  const localUrl = new URL(LOCAL_SERVER);
 
   // Prepare the options for the HTTP request to the local server
   const options = {
-    hostname: LOCAL_SERVER.replace('http://', '').replace('https://', '').split(':')[0],
-    port: LOCAL_SERVER.includes(':') ? LOCAL_SERVER.split(':')[2] : (LOCAL_SERVER.startsWith('https') ? 443 : 80),
-    path: tunnelRequest.path ? `/${tunnelRequest.path}` : '/',
+    hostname: localUrl.hostname,
+    port: localUrl.port || (localUrl.protocol === 'https:' ? 443 : 80),
+    path: path,
     method: tunnelRequest.method,
-    headers: { ...tunnelRequest.headers }
+    headers: { ...tunnelRequest.headers } // Copy headers
   };
 
-  // Remove headers that might cause issues
-  delete options.headers.host;
+  // Remove headers that might cause issues when proxying
+  delete options.headers.host; // Use the host from the local server URL
   delete options.headers.connection;
-  delete options.headers['content-length'];
+  delete options.headers['content-length']; // Let the http module calculate this
 
   // Choose http or https based on the LOCAL_SERVER
-  const requester = LOCAL_SERVER.startsWith('https') ? https : http;
+  const requester = localUrl.protocol === 'https:' ? https : http;
 
   // Create the request to the local server
   const req = requester.request(options, (res) => {
@@ -90,13 +126,13 @@ function handleTunnelRequest(tunnelRequest) {
       const tunnelResponse = {
         type: 'response',
         id: tunnelRequest.id,
-        status: res.statusCode,
+        status: res.statusCode || 500,
         headers: res.headers,
         body: body.toString('base64')
       };
       
       ws.send(JSON.stringify(tunnelResponse));
-      console.log(`Responded to request: ${tunnelRequest.method} ${tunnelRequest.path} with status ${res.statusCode}`);
+      console.log(`Responded to request: ${tunnelRequest.method} ${path} with status ${res.statusCode}`);
     });
   });
   
@@ -107,28 +143,40 @@ function handleTunnelRequest(tunnelRequest) {
     const tunnelResponse = {
       type: 'response',
       id: tunnelRequest.id,
-      status: 502,
+      status: 502, // Bad Gateway
       headers: { 'content-type': 'text/plain' },
-      body: Buffer.from('Bad Gateway - Could not connect to local server').toString('base64')
+      body: Buffer.from(`Bad Gateway - Could not connect to local server at ${LOCAL_SERVER}: ${error.message}`).toString('base64')
     };
     
-    ws.send(JSON.stringify(tunnelResponse));
+    if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(tunnelResponse));
+    }
   });
   
   // Write the request body if it exists
   if (tunnelRequest.body) {
-    const requestBody = Buffer.from(tunnelRequest.body, 'base64');
-    req.write(requestBody);
+    try {
+      const requestBody = Buffer.from(tunnelRequest.body, 'base64');
+      req.write(requestBody);
+    } catch (e) {
+        console.error("Error decoding request body:", e)
+        // Handle potential base64 decoding error - perhaps send a 400 back?
+    }
   }
   
   req.end();
 }
 
-// Handle process termination
-process.on('SIGINT', () => {
-  console.log('Closing connection to tunnel server...');
-  ws.close();
-  process.exit(0);
-});
+// Handle process termination gracefully
+function cleanup() {
+    console.log('\nClosing connection to tunnel server...');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+    }
+    process.exit(0);
+}
+
+process.on('SIGINT', cleanup);
+process.on('SIGTERM', cleanup);
 
 console.log(`Forwarding requests to local server at ${LOCAL_SERVER}`); 

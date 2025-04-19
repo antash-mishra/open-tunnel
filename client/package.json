@@ -1,0 +1,21 @@
+{
+  "name": "tunnel-client",
+  "version": "1.0.0",
+  "description": "Client for WebSocket tunnel",
+  "main": "tunnel-client.js",
+  "scripts": {
+    "start": "node tunnel-client.js"
+  },
+  "dependencies": {
+    "ws": "^8.14.2"
+  },
+  "bin": {
+    "tunnel-client": "./tunnel-client.js"
+  },
+  "keywords": [
+    "tunnel",
+    "websocket",
+    "proxy"
+  ],
+  "license": "MIT"
+} 
